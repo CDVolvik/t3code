@@ -83,12 +83,9 @@ jobs:
             npx expo-updates fingerprint:generate --platform "$platform" > "$RUNNER_TEMP/fp/base/$platform.json"
           done
 
-      - name: Compare and label
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+      - id: compare
+        name: Compare fingerprints
         run: |
-          label="📱 Native Change"
           changed=""
           {
             echo "## Native fingerprint diff"
@@ -111,14 +108,96 @@ jobs:
                   | "  - \(.type): `\(.filePath // .id)`"'
             done
           } >> "$GITHUB_STEP_SUMMARY"
+          echo "changed_platforms=${changed# }" >> "$GITHUB_OUTPUT"
 
-          # Label edits fail on fork PRs (read-only token) — advisory anyway.
-          if [ -n "$changed" ]; then
-            gh label create "$label" \
-              --color D93F0B \
-              --description "Changes the native fingerprint; merging blocks production OTAs until a new store build ships" \
-              --force || true
-            gh pr edit "$PR_NUMBER" --add-label "$label" || true
-          else
-            gh pr edit "$PR_NUMBER" --remove-label "$label" || true
-          fi
+      - name: Sync native change label
+        # Fork PRs get a read-only token under pull_request; the check stays
+        # advisory there (summary only). This workflow must not move to
+        # pull_request_target — it installs and runs PR code.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v8
+        env:
+          CHANGED_PLATFORMS: ${{ steps.compare.outputs.changed_platforms }}
+        with:
+          script: |
+            const managedLabel = {
+              name: "📱 Native Change",
+              color: "d93f0b",
+              description:
+                "Changes the native fingerprint; merging blocks production OTAs until a new store build ships.",
+            };
+            const nativeChanged = (process.env.CHANGED_PLATFORMS ?? "").trim() !== "";
+            const issueNumber = context.payload.pull_request.number;
+
+            try {
+              const { data: existing } = await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: managedLabel.name,
+              });
+
+              if (
+                existing.color !== managedLabel.color ||
+                (existing.description ?? "") !== managedLabel.description
+              ) {
+                await github.rest.issues.updateLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: managedLabel.name,
+                  color: managedLabel.color,
+                  description: managedLabel.description,
+                });
+              }
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: managedLabel.name,
+                  color: managedLabel.color,
+                  description: managedLabel.description,
+                });
+              } catch (createError) {
+                if (createError.status !== 422) {
+                  throw createError;
+                }
+              }
+            }
+
+            const { data: currentLabels } = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+            const hasLabel = currentLabels.some((label) => label.name === managedLabel.name);
+
+            if (nativeChanged && !hasLabel) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: [managedLabel.name],
+              });
+            } else if (!nativeChanged && hasLabel) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  name: managedLabel.name,
+                });
+              } catch (removeError) {
+                if (removeError.status !== 404) {
+                  throw removeError;
+                }
+              }
+            }
+
+            core.info(
+              `PR #${issueNumber}: native fingerprint ${nativeChanged ? `changed (${process.env.CHANGED_PLATFORMS})` : "unchanged"}`,
+            );
