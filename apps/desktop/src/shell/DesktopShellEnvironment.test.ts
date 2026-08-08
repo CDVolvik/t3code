@@ -10,6 +10,8 @@ import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
+import { CommandAvailability } from "@t3tools/shared/shell";
+
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopShellEnvironment from "./DesktopShellEnvironment.ts";
 
@@ -69,7 +71,11 @@ function runShellEnvironment(input: {
   readonly platform: NodeJS.Platform;
   readonly handler: (command: ChildProcess.Command) => string;
   readonly failure?: PlatformError.PlatformError;
+  readonly nodeAvailable?: boolean;
 }) {
+  const commandAvailabilityLayer = Layer.succeed(CommandAvailability, () =>
+    Effect.succeed(input.nodeAvailable ?? false),
+  );
   const environmentLayer = Layer.succeed(
     DesktopEnvironment.DesktopEnvironment,
     DesktopEnvironment.DesktopEnvironment.of({
@@ -91,7 +97,14 @@ function runShellEnvironment(input: {
   }).pipe(
     Effect.provide(
       DesktopShellEnvironment.layer.pipe(
-        Layer.provide(Layer.mergeAll(environmentLayer, NodeServices.layer, spawnerLayer)),
+        Layer.provide(
+          Layer.mergeAll(
+            environmentLayer,
+            NodeServices.layer,
+            spawnerLayer,
+            commandAvailabilityLayer,
+          ),
+        ),
       ),
     ),
   );
@@ -197,7 +210,7 @@ describe("DesktopShellEnvironment", () => {
     }),
   );
 
-  it.effect("loads PowerShell profile environment on Windows", () =>
+  it.effect("loads PowerShell profile environment on Windows when node is missing", () =>
     Effect.gen(function* () {
       const env: NodeJS.ProcessEnv = {
         PATH: "C:\\Windows\\System32",
@@ -209,6 +222,7 @@ describe("DesktopShellEnvironment", () => {
       yield* runShellEnvironment({
         env,
         platform: "win32",
+        nodeAvailable: false,
         handler: (command) => {
           if (command._tag !== "StandardCommand") return "";
           const loadProfile = !command.args.includes("-NoProfile");
@@ -241,6 +255,50 @@ describe("DesktopShellEnvironment", () => {
         env.FNM_MULTISHELL_PATH,
         "C:\\Users\\testuser\\AppData\\Local\\fnm_multishells\\123",
       );
+    }),
+  );
+
+  it.effect("skips the PowerShell profile probe on Windows when node is already resolvable", () =>
+    Effect.gen(function* () {
+      const env: NodeJS.ProcessEnv = {
+        PATH: "C:\\Windows\\System32",
+        APPDATA: "C:\\Users\\testuser\\AppData\\Roaming",
+        LOCALAPPDATA: "C:\\Users\\testuser\\AppData\\Local",
+        USERPROFILE: "C:\\Users\\testuser",
+      };
+      const commands: ChildProcess.Command[] = [];
+
+      yield* runShellEnvironment({
+        env,
+        platform: "win32",
+        nodeAvailable: true,
+        handler: (command) => {
+          commands.push(command);
+          if (command._tag !== "StandardCommand") return "";
+          return command.args.includes("-NoProfile")
+            ? envOutput({ PATH: "C:\\Custom\\Bin;C:\\Windows\\System32" })
+            : envOutput({ PATH: "C:\\Profile\\Node;C:\\Windows\\System32" });
+        },
+      });
+
+      assert.equal(commands.length, 1);
+      assert.isTrue(
+        commands[0]?._tag === "StandardCommand" && commands[0].args.includes("-NoProfile"),
+      );
+      assert.equal(
+        env.PATH,
+        [
+          "C:\\Users\\testuser\\AppData\\Roaming\\npm",
+          "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
+          "C:\\Users\\testuser\\AppData\\Local\\Volta\\bin",
+          "C:\\Users\\testuser\\AppData\\Local\\pnpm",
+          "C:\\Users\\testuser\\.bun\\bin",
+          "C:\\Users\\testuser\\scoop\\shims",
+          "C:\\Custom\\Bin",
+          "C:\\Windows\\System32",
+        ].join(";"),
+      );
+      assert.isUndefined(env.FNM_DIR);
     }),
   );
 

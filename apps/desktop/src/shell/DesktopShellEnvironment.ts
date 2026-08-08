@@ -4,9 +4,11 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import { CommandAvailability } from "@t3tools/shared/shell";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 
@@ -378,17 +380,33 @@ const readWindowsEnvironment = Effect.fn("desktop.shellEnvironment.readWindowsEn
 const installWindowsEnvironment = Effect.fn("desktop.shellEnvironment.installWindowsEnvironment")(
   function* (
     config: ShellEnvironmentConfig,
-  ): Effect.fn.Return<void, never, ChildProcessSpawner.ChildProcessSpawner> {
+  ): Effect.fn.Return<
+    void,
+    never,
+    ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
+  > {
     const noProfile = yield* readWindowsEnvironment(["PATH"], { loadProfile: false });
-    const profile = yield* readWindowsEnvironment(WINDOWS_PROFILE_ENV_NAMES, {
-      loadProfile: true,
-    });
-    const mergedPath = mergePaths("win32", [
-      trimNonEmpty(profile.PATH),
+    const baselinePath = mergePaths("win32", [
       trimNonEmpty(knownWindowsCliDirs(config.env).join(";")),
       trimNonEmpty(noProfile.PATH),
       readEnvPath(config.env),
     ]);
+
+    if (Option.isSome(baselinePath)) {
+      config.env.PATH = baselinePath.value;
+    }
+
+    // Each profile probe spends a fresh timeout on every candidate shell, so only
+    // pay for it when the baseline environment cannot already resolve node.
+    const commandAvailable = yield* CommandAvailability;
+    if (yield* commandAvailable("node", { env: config.env })) {
+      return;
+    }
+
+    const profile = yield* readWindowsEnvironment(WINDOWS_PROFILE_ENV_NAMES, {
+      loadProfile: true,
+    });
+    const mergedPath = mergePaths("win32", [trimNonEmpty(profile.PATH), baselinePath]);
 
     if (Option.isSome(mergedPath)) {
       config.env.PATH = mergedPath.value;
@@ -484,7 +502,11 @@ const installPosixEnvironment = Effect.fn("desktop.shellEnvironment.installPosix
 
 const installShellEnvironment = (
   config: ShellEnvironmentConfig,
-): Effect.Effect<void, never, ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem> => {
+): Effect.Effect<
+  void,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
+> => {
   if (config.platform === "win32") {
     return installWindowsEnvironment(config);
   }
@@ -497,7 +519,9 @@ const installShellEnvironment = (
 export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const commandAvailable = yield* CommandAvailability;
   const installIntoProcess: DesktopShellEnvironment["Service"]["installIntoProcess"] =
     installShellEnvironment({
       env: process.env,
@@ -505,7 +529,9 @@ export const make = Effect.gen(function* () {
       userShell: Option.none(),
     }).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provideService(CommandAvailability, commandAvailable),
       Effect.withSpan("desktop.shellEnvironment.installIntoProcess"),
     );
 
