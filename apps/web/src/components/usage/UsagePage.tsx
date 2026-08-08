@@ -14,6 +14,7 @@ import {
   makeWindow,
 } from "../../usage/usageFormat";
 import { ScrollArea } from "../ui/scroll-area";
+import { AccountLimitsSection } from "./AccountLimits";
 import { UsageChartLegend, UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
 import { PROVIDER_COLOR, PROVIDER_LABEL, PROVIDER_MARK, PROVIDER_ORDER } from "./usageProviders";
 
@@ -98,6 +99,10 @@ export function UsagePage() {
           staleEnvironments={merged.staleEnvironments}
           isPartial={isPartial}
         />
+
+        {/* Limits come from the live limits cache, not the transcript scan,
+            so they render even while the scan below is still pending. */}
+        <AccountLimitsSection />
 
         {isPending ? (
           <p className="py-16 text-center text-sm text-muted-foreground">
