@@ -4113,7 +4113,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         includePartialMessages: true,
         canUseTool,
         env: claudeEnvironment,
-        ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
+        // The attachments dir grant lets the agent Read/copy pasted images at
+        // the paths ProviderService injects into the turn text, without an
+        // approval prompt. It is a leaf directory holding only attachment
+        // files; siblings like secrets/ and state.sqlite stay ungranted.
+        additionalDirectories: [...(input.cwd ? [input.cwd] : []), serverConfig.attachmentsDir],
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
           ? {
