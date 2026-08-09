@@ -1573,12 +1573,15 @@ export default function Sidebar() {
       event.preventDefault();
       event.stopPropagation();
       setProjectScopeMenuOpen(false);
+      if (isMobile) {
+        setOpenMobile(false);
+      }
       void router.navigate({
         to: "/settings/projects/$projectKey",
         params: { projectKey: projectGroup.projectKey },
       });
     },
-    [router],
+    [isMobile, router, setOpenMobile],
   );
 
   // Settled threads stay in the live shell stream (settled ≠ archived), so

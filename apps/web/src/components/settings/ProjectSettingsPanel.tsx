@@ -19,9 +19,10 @@ import type {
   T3ProjectFileScript,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
-import { useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
+import * as Cause from "effect/Cause";
 import { CopyIcon, FolderIcon, PlusIcon, ServerIcon, SettingsIcon, Trash2Icon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
 import { isElectron } from "../../env";
@@ -33,6 +34,7 @@ import {
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useT3ProjectFileState } from "../../hooks/useT3ProjectFileScripts";
 import { shortcutLabelForCommand } from "../../keybindings";
+import { keybindingValueForCommand } from "../../lib/projectScriptKeybindings";
 import { readLocalApi } from "../../localApi";
 import {
   buildProjectScript,
@@ -125,6 +127,7 @@ export function ProjectSettingsPanel({
 }) {
   const groups = useSettingsProjectGroups();
   const navigate = useNavigate();
+  const currentHash = useLocation({ select: (location) => location.hash });
 
   // The index route auto-selects the first project so /settings/projects is
   // never a dead end. Hash is preserved for settings-search jumps.
@@ -135,10 +138,11 @@ export function ProjectSettingsPanel({
     void navigate({
       to: "/settings/projects/$projectKey",
       params: { projectKey: first.projectKey },
+      ...(currentHash ? { hash: currentHash } : {}),
       replace: true,
       hashScrollIntoView: false,
     });
-  }, [groups, navigate, selectedProjectKey]);
+  }, [currentHash, groups, navigate, selectedProjectKey]);
 
   const selected =
     selectedProjectKey === null
@@ -235,6 +239,9 @@ function ProjectDetail({
   const upsertKeybinding = useAtomCommand(serverEnvironment.upsertKeybinding, {
     reportFailure: false,
   });
+  const removeKeybinding = useAtomCommand(serverEnvironment.removeKeybinding, {
+    reportFailure: false,
+  });
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({ type: "success", title: "Path copied", description: path });
@@ -299,7 +306,14 @@ function ProjectDetail({
           () => undefined,
         );
         if (result._tag === "Failure") {
-          reportFailure(failureTitle, result);
+          // A partial fan-out is possible: earlier members already took the
+          // write. Name the environment so the user knows where it stopped.
+          reportFailure(
+            group.memberProjects.length > 1
+              ? `${failureTitle} on ${member.environmentLabel ?? "the current environment"}`
+              : failureTitle,
+            result,
+          );
           return result;
         }
       }
@@ -334,6 +348,10 @@ function ProjectDetail({
   // ----- scripts -----
   const scripts = representative.scripts;
   const [editorRequest, setEditorRequest] = useState<ProjectScriptEditorRequest | null>(null);
+  // Script writes replace the whole array, so two overlapping writes computed
+  // from the same snapshot would drop each other's changes. One at a time.
+  const [isSavingScripts, setIsSavingScripts] = useState(false);
+  const savingScriptsRef = useRef(false);
   const t3File = useT3ProjectFileState(representative.environmentId, representative.workspaceRoot);
   const importableScripts = useMemo(
     () =>
@@ -354,34 +372,74 @@ function ProjectDetail({
       keybinding: string | null | undefined,
       keybindingCommand: ReturnType<typeof commandForProjectScript>,
     ): Promise<AtomCommandResult<void, unknown>> => {
-      const updateResult = await updateAllMembers(
-        { scripts: nextScripts },
-        "Failed to save scripts",
-      );
-      if (updateResult._tag === "Failure") return updateResult;
+      if (savingScriptsRef.current) {
+        return AsyncResult.failure(
+          Cause.fail(new Error("Another script change is still saving. Try again.")),
+        );
+      }
+      savingScriptsRef.current = true;
+      setIsSavingScripts(true);
+      try {
+        // Captured before the write so a cleared or deleted binding can be
+        // removed from the keybindings config afterwards.
+        const previousKeybinding = keybindingValueForCommand(keybindings, keybindingCommand);
+        const updateResult = await updateAllMembers(
+          { scripts: nextScripts },
+          "Failed to save scripts",
+        );
+        if (updateResult._tag === "Failure") return updateResult;
 
-      const keybindingRule = decodeProjectScriptKeybindingRule({
-        keybinding,
-        command: keybindingCommand,
-      });
-      if (isElectron && keybindingRule) {
+        const keybindingRule = decodeProjectScriptKeybindingRule({
+          keybinding,
+          command: keybindingCommand,
+        });
+        if (!isElectron) return updateResult;
         const environmentIds = [
           ...new Set(group.memberProjects.map((member) => member.environmentId)),
         ];
-        for (const environmentId of environmentIds) {
-          const result = mapAtomCommandResult(
-            await upsertKeybinding({ environmentId, input: keybindingRule }),
-            () => undefined,
-          );
-          if (result._tag === "Failure") {
-            reportFailure("Failed to save keybinding", result);
-            return result;
+        if (keybindingRule) {
+          for (const environmentId of environmentIds) {
+            const result = mapAtomCommandResult(
+              await upsertKeybinding({ environmentId, input: keybindingRule }),
+              () => undefined,
+            );
+            if (result._tag === "Failure") {
+              reportFailure("Failed to save keybinding", result);
+              return result;
+            }
+          }
+        } else if (previousKeybinding) {
+          const removalTarget = decodeProjectScriptKeybindingRule({
+            keybinding: previousKeybinding,
+            command: keybindingCommand,
+          });
+          if (removalTarget) {
+            for (const environmentId of environmentIds) {
+              const result = mapAtomCommandResult(
+                await removeKeybinding({ environmentId, input: removalTarget }),
+                () => undefined,
+              );
+              if (result._tag === "Failure") {
+                reportFailure("Failed to remove keybinding", result);
+                return result;
+              }
+            }
           }
         }
+        return updateResult;
+      } finally {
+        savingScriptsRef.current = false;
+        setIsSavingScripts(false);
       }
-      return updateResult;
     },
-    [group.memberProjects, reportFailure, updateAllMembers, upsertKeybinding],
+    [
+      group.memberProjects,
+      keybindings,
+      removeKeybinding,
+      reportFailure,
+      updateAllMembers,
+      upsertKeybinding,
+    ],
   );
 
   const submitScript = useCallback(
@@ -643,7 +701,7 @@ function ProjectDetail({
                   model={resolvedSelection.model}
                   prompt=""
                   onPromptChange={() => {}}
-                  modelOptions={storedSelection?.options ?? []}
+                  modelOptions={resolvedSelection.options ?? []}
                   allowPromptInjectedEffort={false}
                   triggerVariant="outline"
                   triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
@@ -672,6 +730,7 @@ function ProjectDetail({
           <Button
             size="xs"
             variant="outline"
+            disabled={isSavingScripts}
             onClick={() =>
               setEditorRequest({ scriptId: null, initial: EMPTY_PROJECT_SCRIPT_INPUT })
             }
@@ -726,6 +785,7 @@ function ProjectDetail({
                     variant="ghost"
                     className="shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
                     aria-label={`Edit ${script.name}`}
+                    disabled={isSavingScripts}
                     onClick={() => setEditorRequest(editorRequestForScript(script, keybindings))}
                   >
                     <SettingsIcon className="size-3.5" />
@@ -753,6 +813,7 @@ function ProjectDetail({
                     key={`${fileScript.name} ${fileScript.command}`}
                     size="xs"
                     variant="outline"
+                    disabled={isSavingScripts}
                     onClick={() => void importFileScript(fileScript)}
                   >
                     <ScriptIcon icon={fileScript.icon ?? "play"} className="size-3.5" />
