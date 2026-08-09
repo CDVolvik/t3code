@@ -149,6 +149,42 @@ export function ProjectSettingsPanel({
       ? null
       : (groups.find((group) => group.projectKey === selectedProjectKey) ?? null);
 
+  // Remember the members of the last rendered group so a grouping-rule change
+  // (which changes the group key) can follow the project to its new group.
+  const lastSelectionRef = useRef<{ key: string; memberKeys: string[] } | null>(null);
+  useEffect(() => {
+    if (!selected) return;
+    lastSelectionRef.current = {
+      key: selected.projectKey,
+      memberKeys: selected.memberProjects.map((member) => member.physicalProjectKey),
+    };
+  }, [selected]);
+
+  // Recover when the selected key stops matching (regroup, removal, or a
+  // stale deep link) instead of parking on a dead-end message.
+  useEffect(() => {
+    if (selectedProjectKey === null || selected !== null || groups.length === 0) return;
+    const last = lastSelectionRef.current;
+    const successor =
+      last?.key === selectedProjectKey
+        ? (groups.find((group) =>
+            group.memberProjects.some((member) =>
+              last.memberKeys.includes(member.physicalProjectKey),
+            ),
+          ) ?? null)
+        : null;
+    if (successor) {
+      void navigate({
+        to: "/settings/projects/$projectKey",
+        params: { projectKey: successor.projectKey },
+        replace: true,
+        hashScrollIntoView: false,
+      });
+    } else {
+      void navigate({ to: "/settings/projects", replace: true, hashScrollIntoView: false });
+    }
+  }, [groups, navigate, selected, selectedProjectKey]);
+
   const selectProject = useCallback(
     (projectKey: string) => {
       void navigate({
@@ -207,11 +243,7 @@ export function ProjectSettingsPanel({
         />
       ) : (
         <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
-          {groups.length === 0
-            ? "Add a project from the sidebar to configure it here."
-            : selectedProjectKey === null
-              ? null
-              : "This project is gone or was regrouped. Pick one from the list."}
+          {groups.length === 0 ? "Add a project from the sidebar to configure it here." : null}
         </div>
       )}
     </div>
