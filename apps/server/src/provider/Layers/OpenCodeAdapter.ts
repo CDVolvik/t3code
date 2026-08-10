@@ -44,6 +44,7 @@ import {
 import { type OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
 import {
   buildOpenCodePermissionRules,
+  isLoopbackBaseUrl,
   OpenCodeRuntime,
   OpenCodeRuntimeError,
   openCodeQuestionId,
@@ -2407,6 +2408,7 @@ export function makeOpenCodeAdapter(
               const client = openCodeRuntime.createOpenCodeSdkClient({
                 baseUrl: server.url,
                 directory,
+                external: server.external,
                 ...(server.serverPassword ? { serverPassword: server.serverPassword } : {}),
               });
               const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
@@ -2430,7 +2432,7 @@ export function makeOpenCodeAdapter(
               // a confirmed not-found (start fresh); transport/auth/server
               // errors propagate instead of masking as a new empty session.
               const resolved = yield* Effect.gen(function* () {
-                const adopted = resumeSessionId
+                const adoptedRaw = resumeSessionId
                   ? yield* runOpenCodeSdk("session.get", () =>
                       client.session.get({ sessionID: resumeSessionId }),
                     ).pipe(
@@ -2441,33 +2443,53 @@ export function makeOpenCodeAdapter(
                       ),
                     )
                   : undefined;
+                const adopted = (adoptedRaw ?? undefined) as
+                  | { readonly id: string; readonly directory?: string | null }
+                  | undefined;
+
+                // For a remote server the local directory is meaningless — the
+                // client no longer sends it (#3094) and the adopted session's
+                // directory is a Linux path that will never equal the Windows
+                // one. Skip the cwd check and the fork entirely in that case
+                // so we don't reintroduce the Invalid path failure this PR fixes.
+                const isRemote = server.external && !isLoopbackBaseUrl(server.url);
 
                 // Reuse in place only when the session still matches the
                 // requested cwd; on a cwd change it is forked below instead.
-                const reusable =
-                  adopted &&
-                  (!adopted.directory || (yield* sameDirectory(adopted.directory, directory)))
-                    ? adopted
-                    : undefined;
+                // Remote: any adopted session is reusable — directory is server-side.
+                const reusable = (() => {
+                  if (!adopted) return undefined;
+                  if (isRemote) return adopted;
+                  if (!adopted.directory) return adopted;
+                  return null; // need async check below
+                })();
 
-                if (reusable) {
+                let resolvedReusable = reusable as typeof adopted | null;
+                if (reusable === null) {
+                  const same = yield* sameDirectory(adopted!.directory!, directory);
+                  resolvedReusable = same ? adopted : undefined;
+                }
+
+                if (resolvedReusable) {
                   // Resume skips `session.create`, so re-assert the ruleset —
                   // a runtime-mode change would otherwise leave the session on
                   // its original permissions.
                   yield* runOpenCodeSdk("session.update", () =>
                     client.session.update({
-                      sessionID: reusable.id,
+                      sessionID: resolvedReusable!.id,
                       permission: buildOpenCodePermissionRules(input.runtimeMode),
                     }),
                   );
-                  return { openCodeSession: reusable, created: false };
+                  return { openCodeSession: resolvedReusable!, created: false };
                 }
 
                 // The session lives under a different cwd (e.g. the thread
                 // moved into a git worktree). Fork it into the requested
                 // directory instead of minting an empty one — the fork carries
                 // the full history, so the follow-up keeps its context (#3604).
-                if (adopted) {
+                // Never fork a remote session — it would send the local path
+                // back to the server (the #3094 bug). Treat it as reusable above.
+                if (adopted && !isRemote) {
                   yield* Effect.logInfo(
                     `OpenCode session '${adopted.id}' was created under a different working directory; forking into '${directory}' to preserve conversation history.`,
                   );
