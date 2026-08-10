@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import { VcsProcessSpawnError } from "@t3tools/contracts";
+import { VcsProcessSpawnError, VcsProcessTimeoutError } from "@t3tools/contracts";
 
 import * as ServerConfig from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -281,3 +281,75 @@ Logged in to gitlab.com as gitlab-user
     );
   }).pipe(Effect.provide(testLayer));
 });
+
+it.effect(
+  "keeps a slow provider CLI available when its probe budget covers the startup cost",
+  () => {
+    // `az` boots a fresh Python interpreter on every invocation, so `az --version` takes
+    // roughly six seconds on Windows. This mock answers only when the caller waits that long.
+    const azStartupMs = 6_000;
+    const processMock = {
+      run: (input: VcsProcess.VcsProcessInput) => {
+        if (input.command === "az") {
+          if ((input.timeoutMs ?? 0) < azStartupMs) {
+            return Effect.fail(
+              new VcsProcessTimeoutError({
+                operation: input.operation,
+                command: input.command,
+                cwd: input.cwd,
+                timeoutMs: input.timeoutMs ?? 0,
+              }),
+            );
+          }
+          if (input.args[0] === "--version") {
+            return Effect.succeed(processOutput("azure-cli 2.77.0\n"));
+          }
+          if (input.args.join(" ") === "account show --query user.name -o tsv") {
+            return Effect.succeed(processOutput("azure-user@example.com\n"));
+          }
+        }
+        return Effect.fail(
+          new VcsProcessSpawnError({
+            operation: input.operation,
+            command: input.command,
+            cwd: input.cwd,
+            cause: new Error(`${input.command} not found`),
+          }),
+        );
+      },
+    } satisfies Partial<VcsProcess.VcsProcess["Service"]>;
+    const testLayer = SourceControlDiscovery.layer.pipe(
+      Layer.provide(
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "t3-source-control-slow-cli-discovery-",
+        }),
+      ),
+      Layer.provide(Layer.mock(VcsProcess.VcsProcess)(processMock)),
+      Layer.provide(
+        sourceControlProviderRegistryTestLayer({
+          process: processMock,
+          bitbucket: {
+            probeAuth: Effect.succeed({
+              status: "unauthenticated",
+              account: Option.none(),
+              host: Option.some("bitbucket.org"),
+              detail: Option.none(),
+            }),
+          },
+        }),
+      ),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const discovery = yield* SourceControlDiscovery.SourceControlDiscovery;
+      const result = yield* discovery.discover;
+
+      const azure = result.sourceControlProviders.find((item) => item.kind === "azure-devops");
+      assert.ok(azure);
+      assert.strictEqual(azure.status, "available");
+      assert.strictEqual(azure.auth.status, "authenticated");
+      assert.deepStrictEqual(azure.auth.account, Option.some("azure-user@example.com"));
+    }).pipe(Effect.provide(testLayer));
+  },
+);
