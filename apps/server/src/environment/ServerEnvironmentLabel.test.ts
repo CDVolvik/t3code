@@ -7,7 +7,11 @@ import * as PlatformError from "effect/PlatformError";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
-import { HostProcessHostname, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  HostProcessEnvironment,
+  HostProcessHostname,
+  HostProcessPlatform,
+} from "@t3tools/shared/hostProcess";
 import { vi } from "vite-plus/test";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -45,15 +49,19 @@ const LinuxMachineInfoLayer = Layer.merge(
         : Effect.succeed(""),
   }),
 );
+// HostProcessEnvironment defaults to the real process.env, and label resolution now reads
+// WSL_DISTRO_NAME from it, so pin an empty environment unless a test asks for one.
 const withHostPlatform = <ROut, E, RIn>(
   layer: Layer.Layer<ROut, E, RIn>,
   platform: NodeJS.Platform,
   hostname: string,
+  environment: NodeJS.ProcessEnv = {},
 ) =>
   Layer.mergeAll(
     layer,
     Layer.succeed(HostProcessPlatform, platform),
     Layer.succeed(HostProcessHostname, hostname),
+    Layer.succeed(HostProcessEnvironment, environment),
   );
 
 afterEach(() => {
@@ -280,6 +288,63 @@ describe("resolveServerEnvironmentLabel", () => {
       }).pipe(Effect.provide(withHostPlatform(TestLayer, "linux", "   ")));
 
       expect(result).toBe("t3code");
+    }),
+  );
+
+  const blankFriendlyLabel = () => {
+    runMock.mockReturnValueOnce(
+      Effect.succeed({
+        stdout: "",
+        stderr: "",
+        code: ChildProcessSpawner.ExitCode(0),
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      }),
+    );
+  };
+
+  it.effect("marks the WSL distro when the hostname mirrors the Windows host", () =>
+    Effect.gen(function* () {
+      blankFriendlyLabel();
+
+      const result = yield* ServerEnvironmentLabel.resolveServerEnvironmentLabel({
+        cwdBaseName: "t3code",
+      }).pipe(
+        Effect.provide(
+          withHostPlatform(TestLayer, "linux", "GalacticCow", { WSL_DISTRO_NAME: "Ubuntu" }),
+        ),
+      );
+
+      expect(result).toBe("GalacticCow (WSL: Ubuntu)");
+    }),
+  );
+
+  it.effect("leaves a deliberate pretty hostname unmarked under WSL", () =>
+    Effect.gen(function* () {
+      const result = yield* ServerEnvironmentLabel.resolveServerEnvironmentLabel({
+        cwdBaseName: "t3code",
+      }).pipe(
+        Effect.provide(
+          withHostPlatform(LinuxMachineInfoLayer, "linux", "GalacticCow", {
+            WSL_DISTRO_NAME: "Ubuntu",
+          }),
+        ),
+      );
+
+      expect(result).toBe("Build Agent 01");
+    }),
+  );
+
+  it.effect("leaves the hostname alone on Linux outside WSL", () =>
+    Effect.gen(function* () {
+      blankFriendlyLabel();
+
+      const result = yield* ServerEnvironmentLabel.resolveServerEnvironmentLabel({
+        cwdBaseName: "t3code",
+      }).pipe(Effect.provide(withHostPlatform(TestLayer, "linux", "runner-01")));
+
+      expect(result).toBe("runner-01");
     }),
   );
 });

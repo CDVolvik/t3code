@@ -1,4 +1,8 @@
-import { HostProcessHostname, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import {
+  HostProcessEnvironment,
+  HostProcessHostname,
+  HostProcessPlatform,
+} from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -179,6 +183,19 @@ const resolveFriendlyHostLabel = Effect.fn("resolveFriendlyHostLabel")(function*
   return null;
 });
 
+// WSL2 defaults the Linux hostname to the Windows computer name, so a distro and the host that
+// runs it resolve to the same label, as do two distros on the same host. Only the plain-hostname
+// fallback needs this: a PRETTY_HOSTNAME or hostnamectl name was chosen deliberately.
+const resolveWslDistroName = Effect.fn("resolveWslDistroName")(function* () {
+  const platform = yield* HostProcessPlatform;
+  if (platform !== "linux") {
+    return null;
+  }
+
+  const environment = yield* HostProcessEnvironment;
+  return normalizeLabel(environment.WSL_DISTRO_NAME);
+});
+
 export const resolveServerEnvironmentLabel = Effect.fn("resolveServerEnvironmentLabel")(function* (
   input: ResolveServerEnvironmentLabelInput,
 ) {
@@ -189,7 +206,8 @@ export const resolveServerEnvironmentLabel = Effect.fn("resolveServerEnvironment
 
   const hostname = normalizeLabel(yield* HostProcessHostname);
   if (hostname) {
-    return hostname;
+    const wslDistroName = yield* resolveWslDistroName();
+    return wslDistroName ? `${hostname} (WSL: ${wslDistroName})` : hostname;
   }
 
   return normalizeLabel(input.cwdBaseName) ?? "T3 environment";
