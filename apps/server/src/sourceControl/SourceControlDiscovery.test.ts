@@ -353,3 +353,73 @@ it.effect(
     }).pipe(Effect.provide(testLayer));
   },
 );
+
+it.effect(
+  "spends the raised budget twice when a slow CLI answers --version but wedges on auth",
+  () => {
+    // The version and auth probes are sequential and share one per-spec budget, so raising
+    // it also raises the worst case: an `az` that is installed but wedged on `account show`
+    // costs the budget twice before discovery reports an unknown auth state. This test pins
+    // that cost so it stays visible if the number is ever changed.
+    const budgets: Array<number> = [];
+    const processMock = {
+      run: (input: VcsProcess.VcsProcessInput) => {
+        if (input.command === "az") {
+          budgets.push(input.timeoutMs ?? 0);
+          if (input.args[0] === "--version") {
+            return Effect.succeed(processOutput("azure-cli 2.77.0\n"));
+          }
+          return Effect.fail(
+            new VcsProcessTimeoutError({
+              operation: input.operation,
+              command: input.command,
+              cwd: input.cwd,
+              timeoutMs: input.timeoutMs ?? 0,
+            }),
+          );
+        }
+        return Effect.fail(
+          new VcsProcessSpawnError({
+            operation: input.operation,
+            command: input.command,
+            cwd: input.cwd,
+            cause: new Error(`${input.command} not found`),
+          }),
+        );
+      },
+    } satisfies Partial<VcsProcess.VcsProcess["Service"]>;
+    const testLayer = SourceControlDiscovery.layer.pipe(
+      Layer.provide(
+        ServerConfig.layerTest(process.cwd(), {
+          prefix: "t3-source-control-wedged-cli-discovery-",
+        }),
+      ),
+      Layer.provide(Layer.mock(VcsProcess.VcsProcess)(processMock)),
+      Layer.provide(
+        sourceControlProviderRegistryTestLayer({
+          process: processMock,
+          bitbucket: {
+            probeAuth: Effect.succeed({
+              status: "unauthenticated",
+              account: Option.none(),
+              host: Option.some("bitbucket.org"),
+              detail: Option.none(),
+            }),
+          },
+        }),
+      ),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const discovery = yield* SourceControlDiscovery.SourceControlDiscovery;
+      const result = yield* discovery.discover;
+
+      const azure = result.sourceControlProviders.find((item) => item.kind === "azure-devops");
+      assert.ok(azure);
+      assert.strictEqual(azure.status, "available");
+      assert.strictEqual(azure.auth.status, "unknown");
+      assert.deepStrictEqual(budgets, [20_000, 20_000]);
+    }).pipe(Effect.provide(testLayer));
+  },
+);
