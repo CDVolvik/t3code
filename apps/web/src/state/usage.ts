@@ -17,6 +17,7 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useCallback, useMemo } from "react";
 
+import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentPresentations } from "./presentation";
@@ -28,6 +29,45 @@ export interface EnvironmentUsageStatus {
   readonly isPending: boolean;
   readonly error: string | null;
   readonly summary: UsageSummary | null;
+}
+
+// Phases the connection layer only reports once an attempt has already failed.
+// `connecting` is deliberately absent: a first attempt with no failure behind it
+// is genuinely still in flight, and excluding it here is what keeps a normal
+// startup showing the scanning state instead of an error.
+const UNREACHABLE_CONNECTION_PHASES = new Set<EnvironmentConnectionPhase>([
+  "offline",
+  "reconnecting",
+  "error",
+]);
+
+/**
+ * The error row for one environment, or null while it is still worth waiting on.
+ *
+ * A usage query against an unreachable environment stays pending instead of
+ * failing, so the query result on its own never becomes terminal — the page then
+ * holds every device's totals behind a skeleton for the one that will never
+ * answer. The connection layer has already reached that verdict, so it is what
+ * makes the row terminal.
+ *
+ * A summary that arrived before the connection dropped still counts: the totals
+ * are real, and turning that environment into an error row would drop them from
+ * the page it is supposed to be fixing.
+ */
+export function resolveUsageEnvironmentError(input: {
+  readonly queryFailed: boolean;
+  readonly hasSummary: boolean;
+  readonly phase: EnvironmentConnectionPhase;
+}): string | null {
+  if (input.queryFailed) {
+    return "This environment could not report usage.";
+  }
+  if (input.hasSummary) {
+    return null;
+  }
+  return UNREACHABLE_CONNECTION_PHASES.has(input.phase)
+    ? "This environment is not reachable and could not report usage."
+    : null;
 }
 
 /**
@@ -45,12 +85,17 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
     const statuses: EnvironmentUsageStatus[] = [];
     for (const [environmentId, presentation] of presentations) {
       const result = get(serverEnvironment.usageSummary({ environmentId, input }));
+      const summary = Option.getOrNull(AsyncResult.value(result));
       statuses.push({
         environmentId,
         label: presentation.entry.target.label,
         isPending: result.waiting,
-        error: result._tag === "Failure" ? "This environment could not report usage." : null,
-        summary: Option.getOrNull(AsyncResult.value(result)),
+        error: resolveUsageEnvironmentError({
+          queryFailed: result._tag === "Failure",
+          hasSummary: summary !== null,
+          phase: presentation.connection.phase,
+        }),
+        summary,
       });
     }
     return statuses;
