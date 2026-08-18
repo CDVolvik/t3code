@@ -163,7 +163,6 @@ import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,
   CheckCircle2Icon,
-  ChevronDownIcon,
   GitBranchIcon,
   PaperclipIcon,
   WifiOffIcon,
@@ -281,7 +280,7 @@ import {
   threadChangeRequestSnapshotsAtom,
 } from "./ThreadStatusIndicators";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
-import { ThreadSyncStatusPill } from "./chat/ThreadSyncStatusPill";
+import { ThreadOverlayControls } from "./chat/ThreadSyncStatusPill";
 import {
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
   DRAFT_HERO_TRANSITION_DURATION_MS,
@@ -6340,24 +6339,12 @@ function ChatViewContent(props: ChatViewProps) {
                 loadEarlier={loadEarlierTurns}
               />
 
-              {/* scroll to end pill — shown when user has scrolled away from the live edge */}
-              {showScrollToBottom && (
-                <div
-                  className="pointer-events-none absolute left-1/2 z-30 flex -translate-x-1/2 justify-center py-1.5"
-                  style={{ bottom: composerOverlayHeight + 4 }}
-                >
-                  <Button
-                    aria-label="Scroll to end"
-                    onClick={() => scrollToEnd(true)}
-                    className="pointer-events-auto gap-1.5 rounded-full px-3 text-muted-foreground hover:text-foreground"
-                    size="xs"
-                    variant="glass"
-                  >
-                    <ChevronDownIcon className="size-3.5" />
-                    Scroll to end
-                  </Button>
-                </div>
-              )}
+              <ThreadOverlayControls
+                composerOverlayHeight={composerOverlayHeight}
+                onScrollToEnd={() => scrollToEnd(true)}
+                phase={activeEnvironmentUnavailable ? null : threadSyncPhase}
+                showScrollToBottom={showScrollToBottom}
+              />
             </div>
 
             {/* Input bar — centered hero while a draft has no messages, docked at the bottom otherwise */}
@@ -6397,9 +6384,6 @@ function ChatViewContent(props: ChatViewProps) {
                   ) : (
                     <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
                   )}
-                  {threadSyncPhase && !activeEnvironmentUnavailable ? (
-                    <ThreadSyncStatusPill phase={threadSyncPhase} />
-                  ) : null}
                   <div
                     className="relative"
                     style={
