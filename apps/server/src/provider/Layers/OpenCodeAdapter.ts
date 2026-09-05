@@ -2836,7 +2836,7 @@ export function makeOpenCodeAdapter(
               // a confirmed not-found (start fresh); transport/auth/server
               // errors propagate instead of masking as a new empty session.
               const resolved = yield* Effect.gen(function* () {
-                const adoptedRaw = resumeSessionId
+                const adopted = resumeSessionId
                   ? yield* runOpenCodeSdk("session.get", () =>
                       client.session.get({ sessionID: resumeSessionId }),
                     ).pipe(
@@ -2847,10 +2847,6 @@ export function makeOpenCodeAdapter(
                       ),
                     )
                   : undefined;
-                const adopted = (adoptedRaw ?? undefined) as
-                  | { readonly id: string; readonly directory?: string | null }
-                  | undefined;
-
                 // For a remote server the local directory is meaningless — the
                 // client no longer sends it (#3094) and the adopted session's
                 // directory is a Linux path that will never equal the Windows
@@ -2861,30 +2857,25 @@ export function makeOpenCodeAdapter(
                 // Reuse in place only when the session still matches the
                 // requested cwd; on a cwd change it is forked below instead.
                 // Remote: any adopted session is reusable — directory is server-side.
-                const reusable = (() => {
-                  if (!adopted) return undefined;
-                  if (isRemote) return adopted;
-                  if (!adopted.directory) return adopted;
-                  return null; // need async check below
-                })();
+                const reusable =
+                  adopted &&
+                  (isRemote ||
+                    !adopted.directory ||
+                    (yield* sameDirectory(adopted.directory, directory)))
+                    ? adopted
+                    : undefined;
 
-                let resolvedReusable = reusable as typeof adopted | null;
-                if (reusable === null) {
-                  const same = yield* sameDirectory(adopted!.directory!, directory);
-                  resolvedReusable = same ? adopted : undefined;
-                }
-
-                if (resolvedReusable) {
+                if (reusable) {
                   // Resume skips `session.create`, so re-assert the ruleset —
                   // a runtime-mode change would otherwise leave the session on
                   // its original permissions.
                   yield* runOpenCodeSdk("session.update", () =>
                     client.session.update({
-                      sessionID: resolvedReusable!.id,
+                      sessionID: reusable.id,
                       permission: buildOpenCodePermissionRules(input.runtimeMode),
                     }),
                   );
-                  return { openCodeSession: resolvedReusable!, created: false };
+                  return { openCodeSession: reusable, created: false };
                 }
 
                 // The session lives under a different cwd (e.g. the thread

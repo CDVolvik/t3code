@@ -193,6 +193,7 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
                 openCodeRuntime.createOpenCodeSdkClient({
                   baseUrl: server.url,
                   directory: cwd,
+                  external: false,
                   ...(server.serverPassword !== undefined
                     ? { serverPassword: server.serverPassword }
                     : {}),
