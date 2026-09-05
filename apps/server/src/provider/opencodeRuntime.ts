@@ -247,11 +247,7 @@ export interface OpenCodeRuntimeShape {
     readonly cwd?: string;
     readonly maxOutputBytes?: number;
   }) => Effect.Effect<OpenCodeCommandResult, OpenCodeRuntimeError>;
-  readonly createOpenCodeSdkClient: (input: {
-    readonly baseUrl: string;
-    readonly directory: string;
-    readonly serverPassword?: string;
-  }) => OpencodeClient;
+  readonly createOpenCodeSdkClient: (input: OpenCodeSdkClientInput) => OpencodeClient;
   readonly loadOpenCodeInventory: (
     client: OpencodeClient,
   ) => Effect.Effect<OpenCodeInventory, OpenCodeRuntimeError>;
@@ -268,6 +264,75 @@ export interface OpenCodeRuntimeShape {
     readonly cwd: string;
     readonly environment?: NodeJS.ProcessEnv;
   }) => Effect.Effect<ReadonlyArray<OpenCodeSkill>, OpenCodeRuntimeError>;
+}
+
+export interface OpenCodeSdkClientInput {
+  readonly baseUrl: string;
+  readonly directory: string;
+  // Required, not optional: a caller that forgets it is exactly how the local
+  // directory reached a remote server in the first place, and an optional flag
+  // defaulting to "local" would let the next caller reintroduce it silently.
+  readonly external: boolean;
+  readonly serverPassword?: string;
+}
+
+// An externally-configured server can live on another machine, where a local path means
+// nothing: a Windows directory reaching a Linux host produced "Invalid path
+// /var/log/C:\Users\...". A loopback URL is still this machine, so its directory stays
+// meaningful — "external" is not the same thing as "remote". An unparseable URL keeps the
+// directory too, so a malformed setting cannot quietly change what the server receives.
+export function isLoopbackBaseUrl(baseUrl: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(baseUrl).hostname;
+  } catch {
+    return true;
+  }
+
+  return isLoopbackHostname(hostname.toLowerCase());
+}
+
+// Classify the parsed hostname rather than pattern-match the string. `URL` has already
+// done the hard part: it brackets IPv6 literals, canonicalises IPv4 ones (`127.1` and
+// `127.0.0.1.` both arrive as `127.0.0.1`), and leaves domains alone — so `127.example.com`
+// stays a name and must not be read as a `127.` address. Getting that backwards sends the
+// local path to someone else's server, which is the bug this module exists to fix.
+function isLoopbackHostname(hostname: string): boolean {
+  if (hostname.startsWith("[") && hostname.endsWith("]")) {
+    const address = hostname.slice(1, -1);
+    // An IPv4-mapped address is serialised in hex, so `::ffff:127.0.0.1` arrives as
+    // `::ffff:7f00:1`. Match the mapped 127.0.0.0/8 range, not the readable spelling.
+    return (
+      address === "::1" || address === "::" || /^::ffff:7f[\da-f]{2}:[\da-f]{1,4}$/u.test(address)
+    );
+  }
+
+  const octets = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(hostname);
+  if (octets) {
+    // Only a real IPv4 literal reaches here, so the first octet can be trusted.
+    return octets[1] === "127" || hostname === "0.0.0.0";
+  }
+
+  // RFC 6761 reserves `localhost` and everything under it for loopback. `URL` keeps the
+  // root label on a domain, so `localhost.` arrives with its trailing dot still attached.
+  const name = hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+  return name === "localhost" || name.endsWith(".localhost");
+}
+
+export function buildOpenCodeSdkClientConfig(input: OpenCodeSdkClientInput) {
+  const sendDirectory = !input.external || isLoopbackBaseUrl(input.baseUrl);
+  return {
+    baseUrl: input.baseUrl,
+    ...(sendDirectory ? { directory: input.directory } : {}),
+    ...(input.serverPassword
+      ? {
+          headers: {
+            Authorization: `Basic ${Buffer.from(`opencode:${input.serverPassword}`, "utf8").toString("base64")}`,
+          },
+        }
+      : {}),
+    throwOnError: true as const,
+  };
 }
 
 function parseServerUrlFromOutput(output: string): string | null {
@@ -627,18 +692,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     );
 
   const createOpenCodeSdkClient: OpenCodeRuntimeShape["createOpenCodeSdkClient"] = (input) =>
-    createOpencodeClient({
-      baseUrl: input.baseUrl,
-      directory: input.directory,
-      ...(input.serverPassword
-        ? {
-            headers: {
-              Authorization: `Basic ${Buffer.from(`opencode:${input.serverPassword}`, "utf8").toString("base64")}`,
-            },
-          }
-        : {}),
-      throwOnError: true,
-    });
+    createOpencodeClient(buildOpenCodeSdkClientConfig(input));
 
   const startOpenCodeServerProcess: OpenCodeRuntimeShape["startOpenCodeServerProcess"] = (input) =>
     Effect.gen(function* () {
@@ -821,6 +875,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         createOpenCodeSdkClient({
           baseUrl: url,
           directory: input.directory,
+          external: false,
           ...(serverPassword !== undefined ? { serverPassword } : {}),
         }),
       );
@@ -848,6 +903,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         createOpenCodeSdkClient({
           baseUrl: serverUrl,
           directory: input.directory,
+          external: true,
           ...(serverPassword !== undefined ? { serverPassword } : {}),
         }),
       ).pipe(
