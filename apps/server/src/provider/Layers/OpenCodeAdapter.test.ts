@@ -1273,8 +1273,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
 
       return Effect.gen(function* () {
         const adapter = yield* OpenCodeAdapter;
-        // Remote Linux directory will never equal the local Windows cwd — without
-        // the remote short-circuit this would fork and re-send the Windows path (#3094).
+        // The server-side directory differs from this test's local cwd.
         runtimeMock.state.sessionDirectoryById.set("ses_remote", "/var/log");
 
         const session = yield* adapter.startSession({

@@ -269,18 +269,14 @@ export interface OpenCodeRuntimeShape {
 export interface OpenCodeSdkClientInput {
   readonly baseUrl: string;
   readonly directory: string;
-  // Required, not optional: a caller that forgets it is exactly how the local
-  // directory reached a remote server in the first place, and an optional flag
-  // defaulting to "local" would let the next caller reintroduce it silently.
+  // Callers must explicitly identify managed or externally configured servers.
   readonly external: boolean;
   readonly serverPassword?: string;
 }
 
-// An externally-configured server can live on another machine, where a local path means
-// nothing: a Windows directory reaching a Linux host produced "Invalid path
-// /var/log/C:\Users\...". A loopback URL is still this machine, so its directory stays
-// meaningful — "external" is not the same thing as "remote". An unparseable URL keeps the
-// directory too, so a malformed setting cannot quietly change what the server receives.
+// Directory routing treats non-loopback external URLs as remote. This hostname policy
+// cannot distinguish SSH tunnels or same-host LAN URLs. Malformed URLs retain the
+// local-directory policy.
 export function isLoopbackBaseUrl(baseUrl: string): boolean {
   let hostname: string;
   try {
@@ -292,11 +288,8 @@ export function isLoopbackBaseUrl(baseUrl: string): boolean {
   return isLoopbackHostname(hostname.toLowerCase());
 }
 
-// Classify the parsed hostname rather than pattern-match the string. `URL` has already
-// done the hard part: it brackets IPv6 literals, canonicalises IPv4 ones (`127.1` and
-// `127.0.0.1.` both arrive as `127.0.0.1`), and leaves domains alone — so `127.example.com`
-// stays a name and must not be read as a `127.` address. Getting that backwards sends the
-// local path to someone else's server, which is the bug this module exists to fix.
+// URL brackets IPv6 literals and normalizes IPv4 spellings such as `127.1`.
+// Domains such as `127.example.com` remain names, not IPv4 literals.
 function isLoopbackHostname(hostname: string): boolean {
   if (hostname.startsWith("[") && hostname.endsWith("]")) {
     const address = hostname.slice(1, -1);

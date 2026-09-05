@@ -2847,16 +2847,11 @@ export function makeOpenCodeAdapter(
                       ),
                     )
                   : undefined;
-                // For a remote server the local directory is meaningless — the
-                // client no longer sends it (#3094) and the adopted session's
-                // directory is a Linux path that will never equal the Windows
-                // one. Skip the cwd check and the fork entirely in that case
-                // so we don't reintroduce the Invalid path failure this PR fixes.
+                // Non-loopback external servers retain their own session directory.
                 const isRemote = server.external && !isLoopbackBaseUrl(server.url);
 
-                // Reuse in place only when the session still matches the
-                // requested cwd; on a cwd change it is forked below instead.
-                // Remote: any adopted session is reusable — directory is server-side.
+                // Remote sessions keep their server-side cwd. Local sessions need a
+                // matching cwd to be reused; otherwise they are forked below.
                 const reusable =
                   adopted &&
                   (isRemote ||
@@ -2882,8 +2877,6 @@ export function makeOpenCodeAdapter(
                 // moved into a git worktree). Fork it into the requested
                 // directory instead of minting an empty one — the fork carries
                 // the full history, so the follow-up keeps its context (#3604).
-                // Never fork a remote session — it would send the local path
-                // back to the server (the #3094 bug). Treat it as reusable above.
                 if (adopted && !isRemote) {
                   yield* Effect.logInfo(
                     `OpenCode session '${adopted.id}' was created under a different working directory; forking into '${directory}' to preserve conversation history.`,
